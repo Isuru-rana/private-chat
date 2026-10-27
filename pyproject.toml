@@ -1,0 +1,25 @@
+[project]
+name = "privatechat"
+version = "0.1.0"
+description = "Local AI chat with an encrypted secret-chats vault"
+requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx[socks]>=0.27",
+    "argon2-cffi>=23.1",
+    "cryptography>=43",
+    "pypdf>=5",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

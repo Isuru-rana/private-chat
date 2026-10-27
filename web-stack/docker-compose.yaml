@@ -1,0 +1,29 @@
+# Tor + SearXNG for Private Chat. Own network; ports only on 127.0.0.1.
+name: private-web
+services:
+  tor:
+    build: ./tor
+    image: private-web-tor:local
+    container_name: private-web-tor
+    restart: "no"
+    ports:
+      - "127.0.0.1:9050:9050"
+    networks: [private-web]
+  searxng:
+    image: searxng/searxng:2026.10.25-54ca1d9cf
+    container_name: private-web-searxng
+    restart: "no"
+    logging:
+      driver: "none"  # engine-error warnings include the full search query; never write them to disk
+    depends_on: [tor]
+    env_file: .env
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    ports:
+      - "127.0.0.1:8888:8080"
+    networks: [private-web]
+networks:
+  private-web:
+    driver: bridge

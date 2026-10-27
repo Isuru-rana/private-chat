@@ -1,0 +1,54 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo
+      - brave
+      - mojeek
+      - wikipedia
+server:
+  limiter: false
+  image_proxy: false
+general:
+  enable_metrics: false
+search:
+  formats:
+    - html
+    - json
+outgoing:
+  request_timeout: 10
+  using_tor_proxy: true
+  extra_proxy_timeout: 10
+  proxies:
+    all://:
+    - socks5h://s0:x@private-web-tor:9050
+    - socks5h://s1:x@private-web-tor:9050
+    - socks5h://s2:x@private-web-tor:9050
+    - socks5h://s3:x@private-web-tor:9050
+    - socks5h://s4:x@private-web-tor:9050
+    - socks5h://s5:x@private-web-tor:9050
+    - socks5h://s6:x@private-web-tor:9050
+    - socks5h://s7:x@private-web-tor:9050
+    - socks5h://s8:x@private-web-tor:9050
+    - socks5h://s9:x@private-web-tor:9050
+    - socks5h://s10:x@private-web-tor:9050
+    - socks5h://s11:x@private-web-tor:9050
+    - socks5h://s12:x@private-web-tor:9050
+    - socks5h://s13:x@private-web-tor:9050
+    - socks5h://s14:x@private-web-tor:9050
+    - socks5h://s15:x@private-web-tor:9050
+    - socks5h://s16:x@private-web-tor:9050
+    - socks5h://s17:x@private-web-tor:9050
+    - socks5h://s18:x@private-web-tor:9050
+    - socks5h://s19:x@private-web-tor:9050
+    - socks5h://s20:x@private-web-tor:9050
+    - socks5h://s21:x@private-web-tor:9050
+    - socks5h://s22:x@private-web-tor:9050
+    - socks5h://s23:x@private-web-tor:9050
+    - socks5h://s24:x@private-web-tor:9050
+    - socks5h://s25:x@private-web-tor:9050
+    - socks5h://s26:x@private-web-tor:9050
+    - socks5h://s27:x@private-web-tor:9050
+    - socks5h://s28:x@private-web-tor:9050
+    - socks5h://s29:x@private-web-tor:9050
+    - socks5h://s30:x@private-web-tor:9050
+    - socks5h://s31:x@private-web-tor:9050

@@ -1,0 +1,7 @@
+data/
+profile/
+.venv/
+.superpowers/
+__pycache__/
+*.pyc
+.playwright-mcp/
