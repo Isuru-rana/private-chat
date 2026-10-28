@@ -2,8 +2,9 @@ import asyncio
 import base64
 import json
 
-from privatechat.agent import TRIMMED, _trim, run_turn
+from privatechat.agent import TRIMMED, TRIMMED_FILE, _trim, run_turn
 from privatechat.context import IMAGE_TOKENS
+from privatechat.files import FileTools
 from privatechat.web.tools import TOOL_SPECS, ToolOutcome
 
 
@@ -60,11 +61,11 @@ async def count_chars(text):
     return len(text)
 
 
-def drive(msgs, llm, session, mode, approve=None, budget=10**9, max_rounds=6):
+def drive(msgs, llm, session, mode, approve=None, budget=10**9, max_rounds=6, files=None):
     async def go():
         return [e async for e in run_turn(msgs, llm=llm, session=session, mode=mode,
                                           approve=approve or Approver(), count=count_chars,
-                                          budget=budget, max_rounds=max_rounds)]
+                                          budget=budget, max_rounds=max_rounds, files=files)]
     return asyncio.run(go())
 
 
@@ -259,3 +260,70 @@ def test_image_data_already_base64_string():
     drive(USER, llm, FakeSession({"https://i/1.png": out}), "auto")
     part = llm.seen[1][0][2]["content"][1]
     assert part == {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw=="}}
+
+
+FILES = [{"name": "a.txt", "text": "hello file body"}]
+OPEN_ROUND = [("tool_calls", [{"id": "f1", "name": "open_file", "arguments": json.dumps({"name": "a.txt"})}])]
+
+
+def test_open_file_works_with_web_off():
+    llm = FakeLLM(OPEN_ROUND, ANSWER_ROUND)
+    f = final(drive(USER, llm, None, "off", files=FileTools(FILES)))
+    assert llm.seen[0][1] == [FileTools(FILES).spec]
+    tool = [m for m in llm.seen[1][0] if m["role"] == "tool"][0]
+    assert "hello file body" in tool["content"]
+    assert f["steps"][0]["kind"] == "file" and f["steps"][0]["status"] == "done"
+
+
+def test_open_file_never_asks_approval():
+    ap = Approver()
+    drive(USER, FakeLLM(OPEN_ROUND, ANSWER_ROUND), FakeSession(), "ask_each", ap, files=FileTools(FILES))
+    assert ap.requests == []
+
+
+def test_web_call_with_web_off_is_invalid():
+    llm = FakeLLM([("tool_calls", [call("c1", "web_search", query="q")])], ANSWER_ROUND)
+    f = final(drive(USER, llm, None, "off", files=FileTools(FILES)))
+    assert f["steps"][0]["status"] == "error"
+    assert "INVALID" in [m for m in llm.seen[1][0] if m["role"] == "tool"][0]["content"].upper()
+
+
+def test_denied_answer_keeps_file_tool():
+    sess = FakeSession()
+    llm = FakeLLM(SEARCH_ROUND, ANSWER_ROUND)
+    drive(USER, llm, sess, "ask_once", Approver({"allow": False}), files=FileTools(FILES))
+    assert sess.calls == []
+    assert llm.seen[0][1] == TOOL_SPECS + [FileTools(FILES).spec]
+    assert llm.seen[1][1] == [FileTools(FILES).spec]
+
+
+def test_no_files_no_web_unchanged():
+    llm = FakeLLM(ANSWER_ROUND)
+    drive(USER, llm, None, "off")
+    assert llm.seen[0][1] is None
+
+
+def test_newest_round_tool_result_survives_trim_over_budget():
+    msgs = [{"role": "user", "content": "u" * 50},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "w", "type": "function", "function": {"name": "web_search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "w", "content": "W" * 50},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "f", "type": "function", "function": {"name": "open_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "f", "content": "F" * 500}]
+    asyncio.run(_trim(msgs, count_chars, budget=100))
+    assert msgs[2]["content"] == TRIMMED  # older round trimmed first
+    assert msgs[4]["content"] == "F" * 500  # newest round left whole, even over budget
+
+
+def test_old_file_result_gets_file_marker():
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "f", "type": "function", "function": {"name": "open_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "f", "content": "F" * 500},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "g", "type": "function", "function": {"name": "open_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "g", "content": "G" * 50}]
+    asyncio.run(_trim(msgs, count_chars, budget=200))
+    assert msgs[2]["content"] == TRIMMED_FILE and "open_file" in TRIMMED_FILE
+    assert msgs[4]["content"] == "G" * 50

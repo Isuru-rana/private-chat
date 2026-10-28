@@ -164,8 +164,20 @@ details.thinking div { white-space: pre-wrap; border-left: 2px solid var(--borde
 .chip .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chip .x { background: none; border: 0; color: var(--muted); padding: 0 2px; }
 .chip .x:hover { color: var(--danger); }
+.files-summary {
+  background: var(--main);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+div.files-summary { cursor: default; flex-basis: 100%; border: 0; background: none; padding: 0 4px; color: var(--muted); }
+.files-summary.too-big { color: var(--danger); border-color: var(--danger); }
 .msg-atts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; align-items: flex-start; }
 .msg-atts img { max-width: 240px; max-height: 240px; border-radius: 12px; display: block; }
+.msg-atts[hidden], #chips[hidden] { display: none; }
 .msg-atts .chip { max-width: 260px; }
 #input {
   flex: 1;

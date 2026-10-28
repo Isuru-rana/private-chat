@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from .attachments import AttachmentError, process
 from .crypto import DEFAULT_KDF, KdfParams, WrongPassword
-from . import agent, context
+from . import agent, context, files
 from .llm import MAX_TOKENS, LLMError, complete, count_tokens, slots_disabled, stream_chat
 from .store import NormalStore
 from .throttle import Throttle
@@ -115,6 +115,7 @@ def _sse(event: str, data) -> str:
 APPROVAL_TIMEOUT = 300  # seconds; no answer counts as Deny
 NO_ANSWER = "I couldn't finish an answer — try again or rephrase."
 TOR_DOWN = {"kind": "search", "status": "error", "detail": "Tor isn't running"}
+FILE_MAX_ROUNDS = 4  # web off: 3 rounds with open_file, then the answer
 
 
 def allowed_urls(history: list[dict]) -> set[str]:
@@ -253,11 +254,13 @@ def create_app(
         images = sum(a["kind"] == "image" for a in m.get("attachments", []))
         return await count_text(context.message_text(m)) + images * context.IMAGE_TOKENS
 
-    async def web_turn(messages: list[dict], chat_id: str, mode: str, secret: bool, allowed: set[str]):
+    async def web_turn(messages: list[dict], chat_id: str, mode: str, secret: bool, allowed: set[str],
+                       ft: files.FileTools | None = None):
         """Run the agent loop; yields SSE strings, then ("final", dict) as the last item.
-        The loop runs in a task so approval requests can be streamed while it waits."""
+        The loop runs in a task so approval requests can be streamed while it waits.
+        Mode "off" runs only the file tools: no web session, nothing touches Tor."""
         q: asyncio.Queue = asyncio.Queue()
-        web = web_session_factory(chat_id, allowed)
+        web = web_session_factory(chat_id, allowed) if mode != "off" else None
         timed_out = False  # nobody answered: deny the rest of this answer without waiting again
 
         async def approve(req: dict) -> dict:
@@ -284,7 +287,8 @@ def create_app(
             try:
                 async for kind, val in agent.run_turn(
                     messages, llm=llm, session=web, mode=mode, approve=approve,
-                    count=count_text, budget=context_budget,
+                    count=count_text, budget=context_budget, files=ft,
+                    max_rounds=6 if mode != "off" else FILE_MAX_ROUNDS,
                 ):
                     if secret and not vault.keep_alive():
                         raise VaultLocked()  # locked mid-turn: no further rounds or fetches
@@ -312,14 +316,74 @@ def create_app(
                 if client is not None:
                     await client.aclose()
 
+    async def mark_parts(texts: list[dict]) -> None:
+        """Text attachments too big to send inline are read in parts; refuse what needs too many."""
+        tok = await files.text_tokens(texts, count_text)
+        for a in texts:
+            a.pop("read", None)
+        if tok <= files.INLINE_TOKENS:
+            return
+        n = len(await files.split_parts(texts, count_text))
+        if n > files.MAX_PARTS:
+            raise HTTPException(400, f"These files need {n} parts to read; the limit is {files.MAX_PARTS}. Remove some files.")
+        for a in texts:
+            a["read"] = "parts"
+
+    async def read_pass(st, chat_id: str, user: dict, secret: bool):
+        """Notes on each part of the user's big files; saved only when every part is done."""
+        texts = [a for a in user.get("attachments") or [] if a["kind"] == "text"]
+        parts = await files.split_parts(texts, count_text)
+        names = [a["name"] for a in texts]
+        notes = []
+        for k, part in enumerate(parts, 1):
+            if secret and not vault.keep_alive():
+                raise VaultLocked()
+            yield _sse("status", f"Reading part {k} of {len(parts)}…")
+            notes.append(await summarizer(files.notes_prompt(part, k, len(parts), names), max_tokens=files.NOTE_TOKENS))
+        if secret and not vault.keep_alive():
+            raise VaultLocked()
+        await asyncio.to_thread(st.save_notes, chat_id, user["id"], notes)
+
+    def pinned_notes(history: list[dict], notes: dict[str, list[str]]) -> str | None:
+        """Pinned text for the newest user turn with notes; back-to-back user messages
+        (one turn once merged) pin all their notes together."""
+        i = next((i for i in range(len(history) - 1, -1, -1) if history[i].get("id") in notes), None)
+        if i is None:
+            return None
+        lo = hi = i
+        while lo > 0 and history[lo - 1]["role"] == "user":
+            lo -= 1
+        while hi + 1 < len(history) and history[hi + 1]["role"] == "user":
+            hi += 1
+        run = [m for m in history[lo:hi + 1] if m.get("id") in notes]
+        return files.pinned_text([a for m in run for a in m.get("attachments") or [] if a["kind"] == "text"],
+                                 [t for m in run for t in notes[m["id"]]])
+
     def reply_stream(
         st, chat_id: str, save: Callable[..., None], history: list[dict], mode: str = "off", secret: bool = False
     ) -> StreamingResponse:
         async def gen():
             parts = []
             try:
+                notes = await asyncio.to_thread(st.notes, chat_id)
+                # every user message of the turn being answered (after the last reply): a failed
+                # pass on an earlier one is read again here, not left unread
+                tail = len(history)
+                while tail > 0 and history[tail - 1]["role"] == "user":
+                    tail -= 1
+                unread = [m for m in history[tail:] if m["id"] not in notes
+                          and any(a.get("read") == "parts" for a in m.get("attachments") or [])]
+                for m in unread:
+                    async for ev in read_pass(st, chat_id, m, secret):
+                        yield ev
+                if unread:
+                    notes = await asyncio.to_thread(st.notes, chat_id)
+                pin = pinned_notes(history, notes)
+                ft = files.FileTools.from_history(history)
+                budget = context_budget - (await count_text(pin) + context.MSG_OVERHEAD if pin else 0)
+                budget -= files.OPEN_FILE_RESERVE if ft else 0
                 plan = await context.plan(
-                    _alternating(history), count=count_message, budget=context_budget, summaries=st.summaries(chat_id)
+                    _alternating(history), count=count_message, budget=budget, summaries=st.summaries(chat_id)
                 )
                 if plan.needs_summary:
                     yield _sse("status", "Summarizing earlier messages…")
@@ -339,13 +403,16 @@ def create_app(
                         "images_hidden": plan.images_hidden,
                         "summarized": bool(plan.dropped and plan.summary),
                     })
+                msgs = plan.final_messages()
+                if pin:
+                    msgs = files.with_system(msgs, pin)
                 turn_mode, meta = mode, None
                 if turn_mode != "off" and not await tor_check():  # never fall back to a direct fetch
                     yield _sse("web", TOR_DOWN)
                     meta = {"web": {"steps": [dict(TOR_DOWN)], "sources": []}, "urls": []}
                     turn_mode = "off"
-                if turn_mode == "off":
-                    async for kind, text in llm(plan.final_messages()):
+                if turn_mode == "off" and ft is None:
+                    async for kind, text in llm(msgs):
                         if secret and not vault.keep_alive():
                             raise VaultLocked()  # a streaming secret reply counts as use
                         if kind == "content":
@@ -355,7 +422,7 @@ def create_app(
                 else:
                     final = None
                     async with contextlib.aclosing(web_turn(
-                        plan.final_messages(), chat_id, turn_mode, secret, allowed_urls(history)
+                        msgs, chat_id, turn_mode, secret, allowed_urls(history), ft
                     )) as turn:
                         async for item in turn:
                             if isinstance(item, tuple):
@@ -366,9 +433,9 @@ def create_app(
                     if not content.strip():
                         content = NO_ANSWER
                         yield _sse("content", NO_ANSWER)
-                    if final["steps"]:
-                        meta = {"web": {"steps": final["steps"], "sources": final["sources"]},
-                                "urls": final["new_urls"]}
+                    steps = (meta["web"]["steps"] if meta else []) + final["steps"]  # TOR_DOWN first
+                    if steps:
+                        meta = {"web": {"steps": steps, "sources": final["sources"]}, "urls": final["new_urls"]}
                     save(content, meta)
                 yield _sse("done", True)
             except LLMError as e:
@@ -493,7 +560,7 @@ def create_app(
             found(get_store().delete_chat(chat_id) or None)
             return {"ok": True}
 
-        def stream_reply(st, chat_id: str, user_id: str) -> StreamingResponse:
+        def stream_reply(st, chat_id: str, user_id: str) -> StreamingResponse:  # sync: callers thread it
             history = st.history(chat_id, user_id)
             mode = found(st.get_chat(chat_id))["web_mode"]
             return reply_stream(
@@ -503,23 +570,32 @@ def create_app(
             )
 
         @app.post(prefix + "/{chat_id}/messages", dependencies=deps)
-        def send(chat_id: str, body: Message):
+        async def send(chat_id: str, body: Message):
             st = get_store()
-            atts = _prepare(body, allow_empty=body.edit_of is not None)
+            run = asyncio.to_thread  # store calls stay off the event loop (vault writes re-encrypt + fsync)
+            atts = await run(_prepare, body, allow_empty=body.edit_of is not None)
+            texts = lambda: [a for a in atts if a["kind"] == "text"]
             try:
+                found(await run(st.get_chat, chat_id))  # 404 before any token counting
                 if body.edit_of is None:
-                    user_id = st.append_message(chat_id, "user", body.content, atts)
+                    await mark_parts(texts())
+                    user_id = await run(st.append_message, chat_id, "user", body.content, atts)
                 else:
-                    orig = found(st.get_message(chat_id, body.edit_of))
+                    orig = found(await run(st.get_message, chat_id, body.edit_of))
                     if orig["role"] != "user":
                         raise HTTPException(400, "only your own messages can be edited")
+                    new_text = bool(texts())
                     atts = (orig.get("attachments") or []) + atts
                     if not body.content.strip() and not atts:
                         raise HTTPException(400, "empty message")
-                    user_id = st.append_message(chat_id, "user", body.content, atts, parent=orig["parent"])
+                    await mark_parts(texts())
+                    user_id = await run(st.append_message, chat_id, "user", body.content, atts, parent=orig["parent"])
+                    old = None if new_text else (await run(st.notes, chat_id)).get(orig["id"])
+                    if old:  # same files: keep the notes; new text files mean they are read again
+                        await run(st.save_notes, chat_id, user_id, old)
+                return await run(stream_reply, st, chat_id, user_id)
             except KeyError:
                 raise HTTPException(404) from None
-            return stream_reply(st, chat_id, user_id)
 
         @app.post(prefix + "/{chat_id}/regenerate", dependencies=deps)
         def regenerate(chat_id: str, body: Regenerate):

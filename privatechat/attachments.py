@@ -10,10 +10,11 @@ import binascii
 import io
 import os
 
-MAX_FILES = 5
+MAX_FILES = 50
+MAX_IMAGES = 5
+MAX_TOTAL_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_FILE_BYTES = 5 * 1024 * 1024
-MAX_TEXT_CHARS = 24_000  # all files in one message together; the model only sees ~16k tokens
 MAX_NAME = 120
 
 _IMAGE_MAGIC = [
@@ -26,6 +27,11 @@ _IMAGE_MAGIC = [
 
 class AttachmentError(ValueError):
     pass
+
+
+def line_count(text: str) -> int:
+    """Lines split on newline only; a trailing newline does not start a new line."""
+    return max(1, text.count("\n") + (not text.endswith("\n")))
 
 
 def _image_mime(data: bytes) -> str | None:
@@ -58,16 +64,27 @@ def process(raw: list[dict]) -> list[dict]:
     if len(raw) > MAX_FILES:
         raise AttachmentError(f"attach at most {MAX_FILES} files per message")
     out = []
-    text_left = MAX_TEXT_CHARS
+    images = total = 0
+    seen: dict[str, int] = {}
     for item in raw:
         name = _clean_name(item.get("name", "file"))
+        seen[name] = k = seen.get(name, 0) + 1
+        if k > 1:
+            name = f"{name} ({k})"
         try:
             data = base64.b64decode(item.get("data", ""), validate=True)
         except (binascii.Error, ValueError):
             raise AttachmentError(f"{name}: upload was corrupted") from None
 
+        total += len(data)
+        if total > MAX_TOTAL_BYTES:
+            raise AttachmentError("files together can be at most 20 MB")
+
         mime = _image_mime(data)
         if mime:
+            images += 1
+            if images > MAX_IMAGES:
+                raise AttachmentError(f"attach at most {MAX_IMAGES} images per message")
             if len(data) > MAX_IMAGE_BYTES:
                 raise AttachmentError(f"{name}: images can be at most 10 MB")
             out.append({"kind": "image", "name": name, "mime": mime, "data": base64.b64encode(data).decode()})
@@ -84,10 +101,7 @@ def process(raw: list[dict]) -> list[dict]:
                 raise AttachmentError(f"{name}: only images, PDFs and text files are supported") from None
             if "\x00" in text:
                 raise AttachmentError(f"{name}: only images, PDFs and text files are supported")
-        truncated = len(text) > text_left
-        text = text[:text_left]
-        text_left -= len(text)
-        out.append({"kind": "text", "name": name, "text": text, "truncated": truncated})
+        out.append({"kind": "text", "name": name, "text": text, "truncated": False})
     return out
 
 
@@ -103,8 +117,11 @@ def to_llm(message: dict) -> dict:
             images.append({"type": "image_url", "image_url": {"url": f"data:{a['mime']};base64,{a['data']}"}})
         elif a["kind"] == "image_hidden":
             text += f"\n\n[image `{a['name']}` was shared here earlier; it is no longer shown to you]"
+        elif a.get("read") == "parts":
+            text += (f"\n\n[file `{a['name']}` ({line_count(a['text'])} lines) was read in parts; "
+                     "its notes are pinned at the start of this chat; use open_file for exact text]")
         else:
-            note = "\n[this file was cut short: it is longer than the model can read at once]" if a["truncated"] else ""
+            note = "\n[this file was cut short: it is longer than the model can read at once]" if a.get("truncated") else ""
             body = a["text"] or "[no readable text in this file]"
             text += f"\n\nAttached file `{a['name']}`:\n```\n{body}\n```{note}"
     return {"role": message["role"], "content": [{"type": "text", "text": text.strip()}, *images]}

@@ -4,11 +4,14 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from .context import IMAGE_TOKENS
+from .files import FileTools
 from .web.tools import INVALID, TOOL_SPECS, WebSession
 
 TRIMMED = "[older web result trimmed to save space]"
+TRIMMED_FILE = "[older file excerpt trimmed to save space; call open_file again if needed]"
 DENIED = "refused by the user"
-KINDS = {"web_search": ("search", "query"), "read_page": ("page", "url"), "view_image": ("image", "url")}
+KINDS = {"web_search": ("search", "query"), "read_page": ("page", "url"), "view_image": ("image", "url"),
+         "open_file": ("file", "name")}
 
 
 def text_of(m: dict) -> str:
@@ -24,14 +27,18 @@ def _images(m: dict) -> int:
 
 
 async def _trim(msgs: list[dict], count, budget: int) -> None:
+    """Oldest tool results first; the newest round's results are never trimmed."""
     sizes = [await count(text_of(m)) + _images(m) * IMAGE_TOKENS for m in msgs]
     total = sum(sizes)
-    for i, m in enumerate(msgs):
+    names = {tc.get("id"): tc["function"].get("name") for m in msgs for tc in m.get("tool_calls") or []}
+    newest = max((i for i, m in enumerate(msgs) if m.get("tool_calls")), default=len(msgs))
+    for i, m in enumerate(msgs[:newest]):
         if total <= budget:
             return
-        if m.get("role") == "tool" and m.get("content") != TRIMMED:
-            msgs[i] = {**m, "content": TRIMMED}
-            new = await count(TRIMMED)
+        if m.get("role") == "tool" and m.get("content") not in (TRIMMED, TRIMMED_FILE):
+            mark = TRIMMED_FILE if names.get(m.get("tool_call_id")) == "open_file" else TRIMMED
+            msgs[i] = {**m, "content": mark}
+            new = await count(mark)
             total += new - sizes[i]
             sizes[i] = new
 
@@ -49,15 +56,17 @@ def _tool_content(outcome):
 
 async def run_turn(messages: list[dict], *, llm, session: WebSession | None, mode: str,
                    approve: Callable[[dict], Awaitable[dict]], count: Callable[[str], Awaitable[int]],
-                   budget: int, max_rounds: int = 6) -> AsyncIterator[tuple[str, object]]:
+                   budget: int, max_rounds: int = 6, files: FileTools | None = None) -> AsyncIterator[tuple[str, object]]:
     msgs = list(messages)
-    use_tools = mode != "off" and session is not None
+    web_on = mode != "off" and session is not None
     answer_ok: bool | None = None  # ask_once verdict for this answer
     steps, sources, seen_src = [], [], set()
     content = ""
     for rnd in range(1, max_rounds + 1):
         await _trim(msgs, count, budget)
-        tools = TOOL_SPECS if use_tools and rnd < max_rounds else None
+        tools = ((TOOL_SPECS if web_on else []) + ([files.spec] if files else [])) or None
+        if rnd >= max_rounds:
+            tools = None
         content, calls = "", []
         async for kind, val in llm(msgs, tools=tools):
             if kind == "tool_calls":
@@ -77,7 +86,12 @@ async def run_turn(messages: list[dict], *, llm, session: WebSession | None, mod
                 args = json.loads(c["arguments"] or "{}")
             except ValueError:
                 args = None
-            if not isinstance(args, dict):
+            if c["name"] == "open_file" and files is not None:
+                name = args.get("name") if isinstance(args, dict) else ""
+                yield "web", {"kind": "file", "name": name, "status": "running"}
+                outcome = await files.run(args)
+                step, text = outcome.step, outcome.text
+            elif not isinstance(args, dict) or c["name"] not in KINDS or not web_on or c["name"] == "open_file":
                 step = {"kind": kind, key: "", "status": "error", "detail": INVALID}
                 text = INVALID
             else:
@@ -106,6 +120,6 @@ async def run_turn(messages: list[dict], *, llm, session: WebSession | None, mod
             yield "web", step
             msgs.append({"role": "tool", "tool_call_id": c["id"], "content": text})
         if answer_ok is False:
-            use_tools = False
+            web_on = False
     yield "final", {"content": content, "steps": steps, "sources": sources,
                     "new_urls": sorted(session.new_urls) if session is not None else []}

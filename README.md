@@ -51,17 +51,23 @@ Tests: `uv run pytest`.
 - **Opening the vault:** click 🔒 Secret chats and enter the password in its own
   box, never the chat box. The first time, you create the password (at least 12
   characters, entered twice).
-- **Attachments (📎, drag-and-drop, or paste):** up to 5 per message.
+- **Attachments (📎, drag-and-drop, or paste):** up to 50 files per message (at most 5 images, 20 MB together).
   - **Images** (PNG, JPG, GIF, WebP; up to 10 MB) go to Gemma, which can see them.
     On a 4 GB GPU the image encoder runs on the CPU (`--no-mmproj-offload`), so a
     reply with an image takes ~20–40 s.
   - **PDFs and text/code files** (up to 5 MB) have their text extracted and added to
-    the message. The model reads about 24,000 characters of files per message;
-    longer files are cut short and marked "(cut short)".
+    the message. Small files go in whole.
+  - **Big files are read in parts:** text over about 4,000 tokens is read in up
+    to 5 parts, each condensed into notes (the first answer takes about 90 s
+    per part on this machine, so 5 parts is about 7–8 minutes). A message that
+    would need more than 5 parts is refused; remove some files. Follow-up questions reuse the notes, and Gemma can open
+    the exact text of a file when it needs a detail. The page shows
+    "📄 N files · ~K parts" while you attach.
   - The file type is checked from the file's contents, not its name, so other
     binaries are refused.
   - In secret chats, attachments are stored **inside the encrypted vault**. In
-    normal chats they're stored unencrypted, like normal messages.
+    normal chats they're stored unencrypted, like normal messages. In secret chats
+    the notes stay in the vault too.
 - **Editing and going back:** hover a message for its tools.
   - ✏️ **Edit** one of your messages: the chat continues from that point with your new text.
   - 🔄 **Regenerate** any reply for a fresh answer.

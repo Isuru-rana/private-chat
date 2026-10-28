@@ -348,3 +348,48 @@ def test_change_password_derives_keys_outside_the_lock(path, clock, monkeypatch)
     monkeypatch.setattr(vault_module, "derive_key", spy)
     v.change_password(PW, NEW_PW)
     assert free == [True, True]
+
+
+def test_notes_roundtrip_and_unknown_message(path, clock):
+    v = make(path, clock)
+    v.create(PW)
+    chat = v.create_chat("t")
+    mid = v.append_message(chat["id"], "user", "hi")
+    assert v.notes(chat["id"]) == {}
+    v.save_notes(chat["id"], mid, ["n1", "n2"])
+    assert v.notes(chat["id"]) == {mid: ["n1", "n2"]}
+    with pytest.raises(KeyError):
+        v.save_notes(chat["id"], "nope", ["x"])
+
+
+def test_notes_survive_lock_unlock(path, clock):
+    v = make(path, clock)
+    v.create(PW)
+    chat = v.create_chat("t")
+    mid = v.append_message(chat["id"], "user", "hi")
+    v.save_notes(chat["id"], mid, ["secret note"])
+    v.lock()
+    v2 = make(path, clock)
+    v2.unlock(PW)
+    assert v2.notes(chat["id"]) == {mid: ["secret note"]}
+    assert b"secret note" not in all_bytes(path.parent)
+
+
+def test_notes_failed_write_rolls_back(path, clock, monkeypatch):
+    v = make(path, clock)
+    v.create(PW)
+    chat = v.create_chat("t")
+    mid = v.append_message(chat["id"], "user", "hi")
+    v.save_notes(chat["id"], mid, ["old"])
+    real_replace = os.replace
+
+    def flaky(src, dst):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(os, "replace", flaky)
+    with pytest.raises(OSError):
+        v.save_notes(chat["id"], mid, ["new"])
+    assert v.notes(chat["id"]) == {mid: ["old"]}
+    monkeypatch.setattr(os, "replace", real_replace)
+    v.save_notes(chat["id"], mid, ["again"])
+    assert v.notes(chat["id"]) == {mid: ["again"]}

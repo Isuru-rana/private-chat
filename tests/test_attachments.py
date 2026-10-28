@@ -3,8 +3,6 @@ import base64
 import pytest
 
 from privatechat.attachments import (
-    MAX_FILES,
-    MAX_TEXT_CHARS,
     AttachmentError,
     process,
     to_llm,
@@ -20,6 +18,14 @@ def b64(data: bytes) -> str:
 
 def raw(name, data, mime="application/octet-stream"):
     return {"name": name, "mime": mime, "data": b64(data)}
+
+
+def txt(name, s):
+    return raw(name, s.encode())
+
+
+def png(name):
+    return raw(name, PNG)
 
 
 def make_pdf(text: str) -> bytes:
@@ -88,15 +94,31 @@ def test_file_too_big():
         process([raw("big.txt", b"a" * (5 * 1024 * 1024 + 1))])
 
 
-def test_too_many_files():
-    with pytest.raises(AttachmentError):
-        process([raw(f"{i}.txt", b"x") for i in range(MAX_FILES + 1)])
+def test_fifty_files_ok_fifty_one_rejected():
+    assert len(process([txt(f"f{i}.py", "x") for i in range(50)])) == 50
+    with pytest.raises(AttachmentError, match="at most 50 files"):
+        process([txt(f"f{i}.py", "x") for i in range(51)])
 
 
-def test_text_budget_truncates():
-    a, b = process([raw("a.txt", b"a" * (MAX_TEXT_CHARS - 10)), raw("b.txt", b"b" * 100)])
-    assert not a["truncated"] and len(a["text"]) == MAX_TEXT_CHARS - 10
-    assert b["truncated"] and len(b["text"]) == 10
+def test_at_most_five_images():
+    with pytest.raises(AttachmentError, match="at most 5 images"):
+        process([png(f"p{i}.png") for i in range(6)])
+
+
+def test_total_size_capped():
+    big = "a" * (4 * 1024 * 1024)
+    with pytest.raises(AttachmentError, match="20 MB"):
+        process([txt(f"f{i}.txt", big) for i in range(6)])  # 24 MB
+
+
+def test_long_text_is_not_cut():
+    out = process([txt("big.py", "x" * 100_000)])
+    assert len(out[0]["text"]) == 100_000 and out[0]["truncated"] is False
+
+
+def test_duplicate_names_renamed():
+    names = [a["name"] for a in process([txt("__init__.py", "a"), txt("__init__.py", "b"), txt("__init__.py", "c")])]
+    assert names == ["__init__.py", "__init__.py (2)", "__init__.py (3)"]
 
 
 def test_name_is_basename_and_capped():
@@ -130,3 +152,15 @@ def test_to_llm_hidden_image_becomes_note():
     out = to_llm({"role": "user", "content": "old", "attachments": [{"kind": "image_hidden", "name": "cat.png"}]})
     (text,) = out["content"]
     assert "cat.png" in text["text"] and "no longer" in text["text"]
+
+
+def test_to_llm_parts_file_is_marker_not_text():
+    m = {"role": "user", "content": "q", "attachments": [
+        {"kind": "text", "name": "a.py", "text": "l1\nl2\nl3", "truncated": False, "read": "parts"}]}
+    text = to_llm(m)["content"][0]["text"]
+    assert "l1" not in text and "`a.py` (3 lines) was read in parts" in text and "open_file" in text
+
+
+def test_old_truncated_attachment_still_noted():
+    m = {"role": "user", "content": "q", "attachments": [{"kind": "text", "name": "a", "text": "t", "truncated": True}]}
+    assert "cut short" in to_llm(m)["content"][0]["text"]

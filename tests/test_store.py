@@ -59,3 +59,22 @@ def test_migrates_old_db_without_attachments_column(tmp_path):
     assert plain(s.get_chat("c1")["messages"]) == [{"role": "user", "content": "old msg"}]
     s.append_message("c1", "user", "new", ATT)
     assert s.get_chat("c1")["messages"][1]["attachments"] == ATT
+
+
+def test_notes_roundtrip(tmp_path):
+    s = NormalStore(tmp_path / "chats.db")
+    c = s.create_chat("t")
+    mid = s.append_message(c["id"], "user", "hi")
+    assert s.notes(c["id"]) == {}
+    s.save_notes(c["id"], mid, ["n1", "n2"])
+    assert s.notes(c["id"]) == {mid: ["n1", "n2"]}
+    s.save_notes(c["id"], mid, ["n3"])
+    assert s.notes(c["id"]) == {mid: ["n3"]}
+
+
+def test_notes_unknown_message_raises(tmp_path):
+    import pytest
+    s = NormalStore(tmp_path / "chats.db")
+    c = s.create_chat("t")
+    with pytest.raises(KeyError):
+        s.save_notes(c["id"], "nope", ["x"])

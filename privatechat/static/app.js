@@ -24,7 +24,11 @@ const WEB_MODES = [
 const defaultWebMode = (kind) => (kind === "secret" ? "off" : "ask_once");
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-const MAX_FILES = 5;
+const MAX_FILES = 50;
+const MAX_IMAGES = 5;
+const MAX_TOTAL = 20 * 1024 * 1024;
+const MAX_PARTS = 5;
+const COLLAPSE_AFTER = 6; // more files than this show as one summary line
 const MAX_IMAGE = 10 * 1024 * 1024;
 const MAX_FILE = 5 * 1024 * 1024;
 
@@ -170,7 +174,7 @@ function attachmentChip(att, onRemove) {
   }
   const name = document.createElement("span");
   name.className = "name";
-  name.textContent = att.name + (att.truncated ? " (cut short)" : "");
+  name.textContent = att.name + (att.read === "parts" ? " (read in parts)" : att.truncated ? " (cut short)" : "");
   name.title = att.name;
   chip.append(name);
   if (onRemove) {
@@ -190,6 +194,11 @@ function addMessage(role, content, attachments = []) {
   if (attachments.length) {
     const box = document.createElement("div");
     box.className = "msg-atts";
+    const files = attachments.filter((a) => a.kind !== "image");
+    const collapse = files.length > COLLAPSE_AFTER;
+    const list = document.createElement("div");
+    list.className = "msg-atts";
+    list.hidden = collapse;
     for (const att of attachments) {
       if (att.kind === "image") {
         const img = document.createElement("img");
@@ -197,8 +206,15 @@ function addMessage(role, content, attachments = []) {
         img.src = `data:${att.mime};base64,${att.data}`;
         box.append(img);
       } else {
-        box.append(attachmentChip(att));
+        (collapse ? list : box).append(attachmentChip(att));
       }
+    }
+    if (collapse) {
+      const sum = summaryButton(`📄 ${files.length} files`, () => {
+        list.hidden = !list.hidden;
+      });
+      box.append(sum);
+      box.append(list);
     }
     $("messages").append(box);
   }
@@ -218,17 +234,59 @@ function showAttachError(msg) {
   $("attach-error").textContent = msg;
 }
 
+function estimateParts(pending) {
+  // text/code only; PDFs are sized by the server after extraction
+  const bytes = pending
+    .filter((a) => !IMAGE_TYPES.includes(a.mime) && a.mime !== "application/pdf")
+    .reduce((n, a) => n + (a.size || 0), 0);
+  const tokens = bytes / 3.5;
+  return tokens <= 4000 ? 0 : Math.ceil(tokens / 10000);
+}
+
+function summaryButton(text, onClick) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "files-summary";
+  b.textContent = text;
+  b.onclick = onClick;
+  return b;
+}
+
+let chipsExpanded = false;
+
 function renderChips() {
   const box = $("chips");
-  box.replaceChildren(
-    ...state.pending.map((att, i) =>
-      attachmentChip(att, () => {
-        state.pending.splice(i, 1);
-        renderChips();
-      }),
-    ),
+  const n = state.pending.length;
+  const parts = estimateParts(state.pending);
+  const tooBig = parts > MAX_PARTS;
+  const chips = state.pending.map((att, i) =>
+    attachmentChip(att, () => {
+      state.pending.splice(i, 1);
+      renderChips();
+    }),
   );
-  box.hidden = state.pending.length === 0;
+  const hint = document.createElement("div");
+  hint.className = "files-summary" + (tooBig ? " too-big" : "");
+  hint.textContent = tooBig ? `too big: ~${parts} parts (max ${MAX_PARTS})` : `~${parts} parts`;
+  hint.hidden = parts === 0;
+  if (n > COLLAPSE_AFTER) {
+    const label = tooBig ? hint.textContent : `📄 ${n} files` + (parts ? ` · ~${parts} parts` : "");
+    const sum = summaryButton(label, () => {
+      chipsExpanded = !chipsExpanded;
+      renderChips();
+    });
+    if (tooBig) sum.classList.add("too-big");
+    box.replaceChildren(sum, ...(chipsExpanded ? chips : []));
+  } else {
+    chipsExpanded = false;
+    box.replaceChildren(...chips, hint);
+  }
+  box.hidden = n === 0;
+  syncSend();
+}
+
+function syncSend() {
+  $("send").disabled = state.busy || estimateParts(state.pending) > MAX_PARTS;
 }
 
 function readAsBase64(file) {
@@ -248,12 +306,20 @@ async function addFiles(files) {
       break;
     }
     const isImage = IMAGE_TYPES.includes(file.type);
+    if (isImage && state.pending.filter((a) => IMAGE_TYPES.includes(a.mime)).length >= MAX_IMAGES) {
+      showAttachError(`At most ${MAX_IMAGES} images per message.`);
+      continue;
+    }
+    if (state.pending.reduce((n, a) => n + (a.size || 0), 0) + file.size > MAX_TOTAL) {
+      showAttachError("Files together can be at most 20 MB.");
+      break;
+    }
     if (file.size > (isImage ? MAX_IMAGE : MAX_FILE)) {
       showAttachError(`${file.name} is too big (${isImage ? "images: 10 MB" : "files: 5 MB"} max).`);
       continue;
     }
     const name = file.name || (isImage ? "pasted-image.png" : "file");
-    state.pending.push({ name, mime: file.type, data: await readAsBase64(file) });
+    state.pending.push({ name, mime: file.type, size: file.size, data: await readAsBase64(file) });
   }
   renderChips();
 }
@@ -451,6 +517,7 @@ const hostOf = (u) => {
 };
 
 function stepText(s) {
+  if (s.kind === "file") return `Opened file: ${s.name}`;
   const what = s.kind === "search" ? s.query : s.url;
   if (s.kind === "search") return `Searching: ${what}`;
   if (s.kind === "page") return `Reading: ${hostOf(what)} (${what})`;
@@ -471,7 +538,10 @@ function webPanel(steps) {
   const det = document.createElement("details");
   det.className = "web-panel";
   const sum = document.createElement("summary");
-  sum.textContent = `🌐 Used the web: ${count("search")} searches, ${count("page")} pages, ${count("image")} pictures`;
+  const web = steps.length - count("file");
+  sum.textContent = web
+    ? `🌐 Used the web: ${count("search")} searches, ${count("page")} pages, ${count("image")} pictures` + (count("file") ? `, ${count("file")} files` : "")
+    : `📄 Opened ${count("file")} file${count("file") === 1 ? "" : "s"}`;
   det.append(sum);
   for (const s of steps) det.append(stepLine(s));
   return det;
@@ -693,7 +763,7 @@ async function streamReply(resp, chatId, kind) {
         if (ev === "web") {
           steps.push(data);
           // a step replaces its own "running" line instead of listing twice
-          const same = (a, b) => a.kind === b.kind && (a.query ?? a.url) === (b.query ?? b.url);
+          const same = (a, b) => a.kind === b.kind && (a.query ?? a.url ?? a.name) === (b.query ?? b.url ?? b.name);
           const prev = steps.findIndex((s, i) => i < steps.length - 1 && s.status === "running" && same(s, data));
           if (prev >= 0) steps.splice(prev, 1);
           live.replaceChildren(...steps.map(stepLine), ...cards.values());
@@ -785,7 +855,7 @@ async function send(text, uploads) {
   const chatId = state.current.id;
   const resp = await api(`${base(kind)}/${chatId}/messages`, {
     method: "POST",
-    body: { content: text, attachments: uploads },
+    body: { content: text, attachments: uploads.map(({ size, ...u }) => u) },
     secret,
   });
   if (resp.ok) {
@@ -799,7 +869,7 @@ async function send(text, uploads) {
 
 function setBusy(on) {
   state.busy = on;
-  $("send").disabled = on;
+  syncSend();
 }
 
 // ---------- vault ----------
@@ -943,6 +1013,7 @@ async function onSubmit(e) {
   e.preventDefault();
   const text = $("input").value.trim();
   if ((!text && !state.pending.length) || state.busy) return;
+  if (estimateParts(state.pending) > MAX_PARTS) return; // Enter bypasses the disabled Send button
   const uploads = state.pending;
   setBusy(true);
   showAttachError("");

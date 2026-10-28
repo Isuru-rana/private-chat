@@ -287,6 +287,27 @@ class Vault:
         self._commit(lambda: sums.__setitem__(msg_id, text), undo)
 
     @_serialized
+    def notes(self, chat_id: str) -> dict[str, list[str]]:
+        """Reading notes, keyed by the user message they belong to."""
+        return {k: list(v) for k, v in self._find(chat_id).get("notes", {}).items()}
+
+    @_serialized
+    def save_notes(self, chat_id: str, msg_id: str, notes: list[str]) -> None:
+        chat = self._find(chat_id)
+        if not any(m["id"] == msg_id for m in chat["messages"]):
+            raise KeyError(msg_id)
+        store = chat.setdefault("notes", {})
+        old = store.get(msg_id)
+
+        def undo():
+            if old is None:
+                store.pop(msg_id, None)
+            else:
+                store[msg_id] = old
+
+        self._commit(lambda: store.__setitem__(msg_id, list(notes)), undo)
+
+    @_serialized
     def delete_chat(self, chat_id: str) -> bool:
         chats = self._chats()
         idx = next((i for i, c in enumerate(chats) if c["id"] == chat_id), None)

@@ -20,6 +20,10 @@ create table if not exists summaries(
     chat_id text not null references chats(id) on delete cascade,
     msg_id text not null, text text not null,
     primary key(chat_id, msg_id));
+create table if not exists notes(
+    chat_id text not null references chats(id) on delete cascade,
+    msg_id text not null, notes text not null,
+    primary key(chat_id, msg_id));
 """
 
 HEAD = object()  # append after the chat's current head
@@ -182,6 +186,18 @@ class NormalStore:
             if db.execute("select 1 from messages where chat_id = ? and id = ?", (chat_id, msg_id)).fetchone() is None:
                 raise KeyError(msg_id)
             db.execute("insert or replace into summaries values (?, ?, ?)", (chat_id, msg_id, text))
+
+    def notes(self, chat_id: str) -> dict[str, list[str]]:
+        """Reading notes, keyed by the user message they belong to."""
+        with self._db() as db:
+            rows = db.execute("select msg_id, notes from notes where chat_id = ?", (chat_id,)).fetchall()
+        return {m: json.loads(n) for m, n in rows}
+
+    def save_notes(self, chat_id: str, msg_id: str, notes: list[str]) -> None:
+        with self._db() as db:
+            if db.execute("select 1 from messages where chat_id = ? and id = ?", (chat_id, msg_id)).fetchone() is None:
+                raise KeyError(msg_id)
+            db.execute("insert or replace into notes values (?, ?, ?)", (chat_id, msg_id, json.dumps(notes)))
 
     def delete_chat(self, chat_id: str) -> bool:
         with self._db() as db:

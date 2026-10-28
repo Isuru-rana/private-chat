@@ -252,7 +252,7 @@ ATTS = [
 
 
 def recording_llm(seen):
-    async def llm(messages):
+    async def llm(messages, tools=None):  # tools: chats with text files run the file-tool loop
         seen.append(messages)
         yield "content", "seen it"
 
@@ -324,7 +324,7 @@ def test_failed_reply_merges_attachments(tmp_path, clock):
 
 
 def counting_llm(seen):
-    async def llm(messages):
+    async def llm(messages, tools=None):  # tools: chats with text files run the file-tool loop
         seen.append(messages)
         yield "content", f"reply {len(seen)}"
 
