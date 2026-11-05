@@ -69,7 +69,7 @@ if curl -s -m 2 http://127.0.0.1:8888/healthz >/dev/null 2>&1; then
   echo "private web stack already running; leaving it running when the app closes"
 else
   echo "starting private web stack (Tor + SearXNG); a first start can take a few minutes (image download)"
-  [[ -f "$WEB_DIR/.env" ]] || echo "SEARXNG_SECRET=$(openssl rand -hex 32)" > "$WEB_DIR/.env"
+  [[ -f "$WEB_DIR/.env" ]] || (umask 077; echo "SEARXNG_SECRET=$(openssl rand -hex 32)" > "$WEB_DIR/.env")
   STARTED_WEB=1  # set before up: cleanup's idempotent `down` also covers partial starts and Ctrl+C
   if docker compose -f "$WEB_COMPOSE" up -d --build >/dev/null 2>&1; then
     web_ok=0
