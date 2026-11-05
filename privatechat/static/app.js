@@ -621,6 +621,13 @@ function approvalCard(req, kind, chatId) {
       : "Gemma wants to use the web to answer.";
   card.setAttribute("aria-label", label.textContent);
   card.append(label);
+  if (req.because) {
+    // Auto / Ask-once ask too once text from outside (a page, a file) could be steering Gemma
+    const why = document.createElement("div");
+    why.className = "approval-why";
+    why.textContent = `Asking because ${req.because}. Text from outside can tell Gemma to leak this chat through searches or links.`;
+    card.append(why);
+  }
   let field = null;
   if (req.kind === "search") {
     field = document.createElement("input");
