@@ -37,6 +37,18 @@ class WrongPassword(Exception):
     pass
 
 
+# Accepted KDF params when opening a file. The header is read before anything is authenticated,
+# so without bounds a tampered vault.bin could ask Argon2 for up to 4 TiB of memory (OOM / hang).
+MAX_TIME_COST = 16
+MAX_MEMORY_COST = 1024 * 1024  # KiB = 1 GiB
+MAX_PARALLELISM = 16
+
+
+def _sane(kdf: KdfParams) -> bool:
+    return (1 <= kdf.time_cost <= MAX_TIME_COST and 1 <= kdf.parallelism <= MAX_PARALLELISM
+            and 8 * kdf.parallelism <= kdf.memory_cost <= MAX_MEMORY_COST)
+
+
 def _derive(password: str, salt: bytes, kdf: KdfParams) -> bytearray:
     return bytearray(
         hash_secret_raw(
@@ -76,6 +88,8 @@ def open_blob(password: str, blob: bytes) -> tuple[bytes, bytearray, bytes, KdfP
     if len(blob) < _HEADER_LEN + NONCE_LEN or blob[:4] != MAGIC:
         raise WrongPassword()
     kdf = KdfParams(*_PARAMS.unpack(blob[4 : 4 + _PARAMS.size]))
+    if not _sane(kdf):
+        raise WrongPassword()
     salt = blob[4 + _PARAMS.size : _HEADER_LEN]
     nonce = blob[_HEADER_LEN : _HEADER_LEN + NONCE_LEN]
     key = _derive(password, salt, kdf)

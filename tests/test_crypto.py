@@ -71,3 +71,22 @@ def test_wipe():
     _, key = seal(PW, b"x", FAST_KDF)
     wipe(key)
     assert all(b == 0 for b in key)
+
+
+@pytest.mark.parametrize("params", [(1, 2**32 - 1, 1), (2**32 - 1, 8, 1), (1, 8, 0), (1, 8, 200), (0, 8, 1)])
+def test_absurd_kdf_params_refused_before_argon2(params, monkeypatch):
+    blob, _ = seal("pw", b"x", FAST_KDF)
+    bad = blob[:4] + struct.pack(">IIB", *params) + blob[4 + 9 :]
+    import privatechat.crypto as crypto
+
+    def boom(*a, **k):
+        raise AssertionError("argon2 must not run")
+
+    monkeypatch.setattr(crypto, "hash_secret_raw", boom)
+    with pytest.raises(WrongPassword):
+        open_blob("pw", bad)
+
+
+def test_default_params_accepted():
+    blob, _ = seal("pw", b"x", KdfParams(1, 65536, 4))
+    assert open_blob("pw", blob)[0] == b"x"
