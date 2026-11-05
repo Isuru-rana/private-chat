@@ -24,8 +24,10 @@ fi
 BACKEND=""
 LLAMA=""
 STARTED_WEB=0
+LAUNCH=""
 cleanup() {
   trap - EXIT INT TERM
+  [[ -n "$LAUNCH" ]] && rm -f "$LAUNCH" || true
   [[ -n "$BACKEND" ]] && kill "$BACKEND" 2>/dev/null || true
   if [[ "$STARTED_WEB" == 1 ]]; then
     echo "stopping private web stack"
@@ -103,7 +105,11 @@ prefs.setdefault("autofill", {}).update({"profile_enabled": False, "credit_card_
 json.dump(prefs, open(path, "w"))
 PY
 
-PC_PORT="$PORT" uv run python -m privatechat &
+# Per-launch app token: the API refuses requests without it, so other local users and programs
+# can't use the app through the loopback port. It reaches the backend through its environment and
+# the browser through a 0600 launch page, never a command line (`ps` shows those to every user).
+APP_TOKEN="$(openssl rand -hex 32)"
+PC_PORT="$PORT" PC_APP_TOKEN="$APP_TOKEN" uv run python -m privatechat &
 BACKEND=$!
 
 for _ in $(seq 50); do
@@ -116,11 +122,20 @@ if ! kill -0 "$BACKEND" 2>/dev/null; then
   exit 1
 fi
 
+if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -O "$XDG_RUNTIME_DIR" ]]; then
+  LAUNCH="$(mktemp -p "$XDG_RUNTIME_DIR" --suffix=.html privatechat-launch.XXXXXXXXXX)"
+else
+  LAUNCH="$(mktemp --suffix=.html)"
+fi
+chmod 600 "$LAUNCH"
+printf '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=%s/?k=%s"><title>Chat</title>\n' \
+  "$URL" "$APP_TOKEN" > "$LAUNCH"
+
 echo "app running at $URL — close the window (or press Ctrl+C) to stop"
 # Brave's console output is harmless GLib/GPU noise; keep the terminal clean.
 brave-browser \
   --user-data-dir="$DIR/profile" \
-  --app="$URL" \
+  --app="file://$LAUNCH" \
   --no-first-run --no-default-browser-check \
   --disable-extensions --disable-sync \
   --disable-features=Translate,SpellcheckService,AutofillServerCommunication \
