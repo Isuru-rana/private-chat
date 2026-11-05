@@ -136,6 +136,19 @@ def _default_web_session(chat_id: str, allowed: set[str]) -> WebSession:
     return WebSession(allowed, client=tor_client(isolation_for_chat(chat_id)))
 
 
+# The page loads only its own script/style and data: images; it may never be framed (clickjacking).
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+       "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+SECURITY_HEADERS = {
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": CSP,
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
+
 CONTEXT_SIZE = int(os.environ.get("PC_CTX", "16384"))  # must match llama-server's -c
 SUMMARY_MAX_TOKENS = 600
 
@@ -201,12 +214,6 @@ def create_app(
     app.state.approvals = approvals
 
     @app.middleware("http")
-    async def no_store(request: Request, call_next):
-        resp = await call_next(request)
-        resp.headers["Cache-Control"] = "no-store"
-        return resp
-
-    @app.middleware("http")
     async def same_origin_writes(request: Request, call_next):
         # Block cross-site requests from other web pages (CSRF). Browsers send
         # Sec-Fetch-Site / Origin; non-browser local clients send neither.
@@ -219,6 +226,12 @@ def create_app(
             ):
                 return JSONResponse({"error": "cross_site"}, status_code=403)
         return await call_next(request)
+
+    @app.middleware("http")  # added after the others so their refusals get the headers too
+    async def security_headers(request: Request, call_next):
+        resp = await call_next(request)
+        resp.headers.update(SECURITY_HEADERS)
+        return resp
 
     # Added last so it runs first: rejects DNS-rebinding requests with a foreign Host.
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
