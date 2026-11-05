@@ -142,9 +142,16 @@ with current data. Everything goes through **Tor**; nothing is ever fetched dire
   - **Off:** Gemma gets no web tools at all.
   - **Ask every time:** each search / page / picture shows a card with Allow / Deny;
     the search text can be edited before it goes out.
-  - **Ask once per answer:** one Allow, then Gemma makes the requests it needs for
-    that answer.
-  - **Auto:** no prompts.
+  - **Ask once per answer:** one Allow for the first requests of an answer.
+  - **Auto:** no prompt for the first requests of an answer.
+  - **Auto and Ask once still ask after pages are read.** As soon as Gemma has seen
+    text from outside (search results, a page, a picture) every further search, page
+    or picture in that answer gets its own Allow / Deny card, with the reason shown.
+    If the chat has attached files, or an earlier answer in it used web results,
+    this starts with the very first request. Reason: a page or file can hide
+    instructions telling Gemma to put your chat into a search query, or to pick links
+    whose choice spells out a secret; the card lets you see that before it leaves the
+    laptop. In a clean chat, Auto runs only its first round of requests silently.
   - New normal chats start on **Ask once per answer**; new **secret chats start Off**.
   - Unanswered cards count as Deny after 5 minutes; locking the vault denies
     pending secret-chat cards.
