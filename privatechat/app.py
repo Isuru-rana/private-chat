@@ -148,6 +148,8 @@ SECURITY_HEADERS = {
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Resource-Policy": "same-origin",
 }
+# 20 MB of attachments is ~27 MB as base64 JSON; anything far beyond that is refused before it is read.
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
 
 CONTEXT_SIZE = int(os.environ.get("PC_CTX", "16384"))  # must match llama-server's -c
 SUMMARY_MAX_TOKENS = 600
@@ -212,6 +214,17 @@ def create_app(
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.vault = vault
     app.state.approvals = approvals
+
+    @app.middleware("http")
+    async def body_limit(request: Request, call_next):
+        # Refuse oversized bodies up front. Browsers always send Content-Length for fetch() bodies,
+        # so a chunked upload (no length) is refused rather than read without a bound.
+        length = request.headers.get("content-length")
+        if length is None and "transfer-encoding" in request.headers:
+            return JSONResponse({"error": "length_required"}, status_code=411)
+        if length is not None and (not length.isdigit() or int(length) > MAX_REQUEST_BYTES):
+            return JSONResponse({"error": "too_large"}, status_code=413)
+        return await call_next(request)
 
     @app.middleware("http")
     async def same_origin_writes(request: Request, call_next):
