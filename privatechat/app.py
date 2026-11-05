@@ -169,7 +169,10 @@ def create_app(
     context_budget: int = CONTEXT_SIZE - MAX_TOKENS - 300,
     web_session_factory: Callable[[str, set[str]], WebSession] | None = None,
     tor_check: Callable[[], Awaitable[bool]] = tor_reachable,
+    app_token: str | None = None,
 ) -> FastAPI:
+    """app_token: per-launch secret every /api request must carry in X-App-Token (random if not given)."""
+    app_token = app_token or secrets.token_urlsafe(32)
     web_session_factory = web_session_factory or _default_web_session
     # httpx logs every request URL at INFO; web URLs of secret chats must never reach a log
     for name in ("httpx", "httpcore"):
@@ -215,6 +218,7 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.vault = vault
+    app.state.app_token = app_token
     app.state.approvals = approvals
 
     @app.middleware("http")
@@ -226,6 +230,16 @@ def create_app(
             return JSONResponse({"error": "length_required"}, status_code=411)
         if length is not None and (not length.isdigit() or int(length) > MAX_REQUEST_BYTES):
             return JSONResponse({"error": "too_large"}, status_code=413)
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def require_app_token(request: Request, call_next):
+        # Loopback is reachable by every local user and process; only the page this launch opened
+        # knows the token. The page and its static files stay public: <script>/<link> can't send headers.
+        if request.url.path.startswith("/api/"):
+            sent = request.headers.get("x-app-token", "")
+            if not secrets.compare_digest(sent.encode(), app_token.encode()):
+                return JSONResponse({"error": "app_token"}, status_code=401)
         return await call_next(request)
 
     @app.middleware("http")
