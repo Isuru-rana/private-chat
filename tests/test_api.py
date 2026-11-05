@@ -44,15 +44,19 @@ async def _offline_counter(text):
     return len(text) // 3 + 1
 
 
+APP_TOKEN = "test-app-token"
+
+
 def make_client(tmp_path, clock, llm=fake_llm, **kw):
     kw.setdefault("allowed_hosts", ["testserver"])
+    kw.setdefault("app_token", APP_TOKEN)
     async def _no_tor():
         return False
 
     kw.setdefault("tor_check", _no_tor)  # tests never depend on a running Tor
     kw.setdefault("counter", _offline_counter)  # never call a real llama-server from tests
     app = create_app(tmp_path, kdf=FAST_KDF, llm=llm, clock=clock, slots_check=slots_ok, **kw)
-    return TestClient(app)
+    return TestClient(app, headers={"X-App-Token": APP_TOKEN})
 
 
 @pytest.fixture
@@ -209,11 +213,12 @@ def test_parallel_unlocks_respect_throttle(tmp_path, clock):
     import httpx
 
     app = create_app(tmp_path, kdf=FAST_KDF, llm=fake_llm, clock=clock, slots_check=slots_ok,
-                     allowed_hosts=["testserver"])
+                     allowed_hosts=["testserver"], app_token=APP_TOKEN)
 
     async def go():
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver",
+                                     headers={"X-App-Token": APP_TOKEN}) as c:
             await c.post("/api/vault/create", json={"password": PW})
             await c.post("/api/vault/lock")
             rs = await asyncio.gather(*[c.post("/api/vault/unlock", json={"password": "w" * 12}) for _ in range(20)])
