@@ -37,9 +37,11 @@ when you close the app window or press Ctrl+C. If llama-server was already runni
 exit only if `run.sh` started it. If the stack can't start, the app still runs and
 web tools report "Tor isn't running".
 
-Backend only: `uv run python -m privatechat`, then open http://127.0.0.1:3050
-(`PC_PORT` and `PC_DATA` change the port and the data folder).
-Tests: `uv run pytest`.
+Backend only: `uv run python -m privatechat`, then open the URL it prints
+(`http://127.0.0.1:3050/?k=<key>`; a new key every start). Set `PC_APP_TOKEN` to choose the key
+yourself. `PC_PORT` and `PC_DATA` change the port and the data folder.
+Tests: `uv run pytest`. The real-browser tests in `tests/test_browser_lock.py` are skipped unless
+Playwright is installed: `uv run --with playwright pytest tests/test_browser_lock.py`.
 
 ## How it works
 
@@ -101,6 +103,15 @@ Tests: `uv run pytest`.
   - The backend binds 127.0.0.1 and rejects requests with a foreign Host header,
     which blocks DNS rebinding.
   - It rejects cross-site write requests (CSRF).
+  - **App key per launch:** every `/api` request needs a random key that changes each
+    time `run.sh` starts the app, so other users and programs on the laptop can't read
+    normal chats, lock or wipe the vault through the local port. `run.sh` hands the key to
+    the backend in its environment and to Brave through a launch page readable only by you
+    (in `$XDG_RUNTIME_DIR`, deleted when the app closes), never on a command line, where
+    `ps` would show it. The page keeps the key in memory and in its address (`?k=…`, so a
+    reload works); no cookies. The key ends up in Brave's history inside `profile/`, but it
+    is useless after the next start. Pages that don't come from this launch (another tab,
+    an old bookmark) say "no valid app key". Closing the window still locks the vault.
   - llama-server runs with `--no-slots`.
   - `run.sh` turns off Brave's password manager in the app profile, so the vault
     password is never offered for saving. It also refuses to start if port 3050
