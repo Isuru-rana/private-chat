@@ -24,7 +24,7 @@ Line numbers refer to this branch after the fixes.
 | L2 | Low | Argon2 parameters in the vault header are unbounded (tampered file → OOM/hang) | **Fixed** |
 | L3 | Low | No request body size limit | **Fixed** |
 | L4 | Low | `data/` created world-readable; `chats.db` readable by other local users | **Fixed** |
-| L5 | Low | API has no authentication for normal chats; any local process/user can use it | Open |
+| L5 | Low | API has no authentication for normal chats; any local process/user can use it | **Fixed** (follow-up) |
 | L6 | Low | `web-stack/.env` (SearXNG secret) written world-readable | **Fixed** |
 | I1–I7 | Info | See "Informational" | Not changed |
 
@@ -148,17 +148,28 @@ defences and output escaping are sound (details under "Checked and found sound")
 - **Fix:** commit "Create the data directory with mode 0700". Test:
   `tests/test_security_headers.py::test_data_dir_private`.
 
-### L5. API is unauthenticated for normal chats — Open
+### L5. API is unauthenticated for normal chats — Fixed (follow-up)
 
-- **Where:** `privatechat/app.py` routes under `/api/chats`, `/api/vault/wipe`, `/api/vault/lock`.
+- **Where:** `privatechat/app.py` middleware `require_app_token`, `privatechat/__main__.py`,
+  `privatechat/static/app.js` (`APP_TOKEN`, `api()`, the `pagehide` handler), `run.sh`.
 - **Issue:** the server binds `127.0.0.1` and rejects foreign `Host` and cross-site writes, which
-  stops other machines and websites. It does not stop **other local processes or other local users**:
-  anyone who can open a TCP connection to `127.0.0.1:3050` can read every normal chat (bypassing the
-  0700 data directory from L4), lock the vault, or wipe it. Secret chats still need the vault token.
-- **Status:** not changed; fixing it means a per-launch secret handed from `run.sh` to the browser
-  (e.g. a token in the app URL exchanged for an `HttpOnly; SameSite=Strict` cookie), which changes
-  the "no cookies" design and the frontend. Acceptable for the documented single-user laptop;
-  worth doing before running on a shared machine.
+  stops other machines and websites. It did not stop **other local processes or other local users**:
+  anyone who could open a TCP connection to `127.0.0.1:3050` could read every normal chat (bypassing
+  the 0700 data directory from L4), lock the vault, or wipe it. Secret chats still needed the vault token.
+- **Fix:** every `/api/*` request must carry a per-launch random key in `X-App-Token` (compared in
+  constant time; 401 otherwise). `run.sh` makes the key with `openssl rand`, passes it to the backend
+  in `PC_APP_TOKEN` (an environment only the same user can read) and to Brave through a 0600 launch
+  page made with `mktemp` in `$XDG_RUNTIME_DIR` (plain `mktemp` if unset), removed on exit; the key is
+  never on a command line. The page reads it from `?k=` and keeps it in memory; no cookies or browser
+  storage. The lock request on tab close used `navigator.sendBeacon`, which can't send headers and
+  would have been refused, leaving the vault unlocked; it is now a `keepalive` fetch with the key.
+  `Referrer-Policy: no-referrer` on every response keeps `?k=` out of any outgoing request.
+  `/` and `/static/*` stay public (the browser can't add headers to `<script>`/`<link>` loads).
+  Tests: `tests/test_app_token.py`; real Chromium in `tests/test_browser_lock.py` (tab close locks
+  the vault, reload keeps working, a page without the key explains and reads nothing).
+- **Remaining:** another program running as the **same** user can still read the key (from the
+  backend's environment, the launch page or Brave's history in `profile/`); it could read `data/`
+  directly anyway.
 
 ### L6. SearXNG secret file world-readable — Fixed
 
