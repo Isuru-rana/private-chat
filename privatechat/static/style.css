@@ -327,6 +327,7 @@ dialog input:focus { outline: 2px solid var(--accent); border-color: transparent
 .web-step.refused, .web-step.error, .web-step.denied { color: var(--danger); }
 .approval { border: 1px solid var(--accent); border-radius: 12px; padding: 10px 12px; background: var(--bubble); display: flex; flex-direction: column; gap: 8px; }
 .approval-label { font-size: 14px; }
+.approval-why { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .approval input { background: var(--main); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; }
 .approval-url { overflow-wrap: anywhere; font-size: 13px; color: var(--muted); }
 .web-panel { margin-top: 8px; font-size: 13px; color: var(--muted); }
