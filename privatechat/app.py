@@ -132,6 +132,28 @@ def allowed_urls(history: list[dict]) -> set[str]:
     return {n for n in (normalize_url(u) for u in raw if isinstance(u, str)) if n}
 
 
+OUTSIDE_FILES = "this chat has attached files"
+OUTSIDE_WEB = "earlier answers in this chat used web results"
+
+
+def outside_text(history: list[dict]) -> str | None:
+    """Why the model already sees text that didn't come from the user (so a page or file may have
+    planted instructions): attachments anywhere on this branch, or an earlier answer that got web
+    results. None for a clean chat. Never raises on malformed data."""
+    if any(m.get("attachments") for m in history):
+        return OUTSIDE_FILES
+    for m in history:
+        meta = m.get("meta")
+        web = meta.get("web") if isinstance(meta, dict) else None
+        steps = web.get("steps") if isinstance(web, dict) else None
+        if isinstance(steps, list) and any(
+            isinstance(st, dict) and st.get("status") == "done" and st.get("kind") in ("search", "page", "image")
+            for st in steps
+        ):
+            return OUTSIDE_WEB
+    return None
+
+
 def _default_web_session(chat_id: str, allowed: set[str]) -> WebSession:
     return WebSession(allowed, client=tor_client(isolation_for_chat(chat_id)))
 
@@ -297,7 +319,7 @@ def create_app(
         return await count_text(context.message_text(m)) + images * context.IMAGE_TOKENS
 
     async def web_turn(messages: list[dict], chat_id: str, mode: str, secret: bool, allowed: set[str],
-                       ft: files.FileTools | None = None):
+                       ft: files.FileTools | None = None, outside: str | None = None):
         """Run the agent loop; yields SSE strings, then ("final", dict) as the last item.
         The loop runs in a task so approval requests can be streamed while it waits.
         Mode "off" runs only the file tools: no web session, nothing touches Tor."""
@@ -329,7 +351,7 @@ def create_app(
             try:
                 async for kind, val in agent.run_turn(
                     messages, llm=llm, session=web, mode=mode, approve=approve,
-                    count=count_text, budget=context_budget, files=ft,
+                    count=count_text, budget=context_budget, files=ft, outside=outside,
                     max_rounds=6 if mode != "off" else FILE_MAX_ROUNDS,
                 ):
                     if secret and not vault.keep_alive():
@@ -464,7 +486,7 @@ def create_app(
                 else:
                     final = None
                     async with contextlib.aclosing(web_turn(
-                        msgs, chat_id, turn_mode, secret, allowed_urls(history), ft
+                        msgs, chat_id, turn_mode, secret, allowed_urls(history), ft, outside_text(history)
                     )) as turn:
                         async for item in turn:
                             if isinstance(item, tuple):
