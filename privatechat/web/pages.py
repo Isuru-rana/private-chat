@@ -1,7 +1,9 @@
 """Fetch and reduce web pages / images over a Tor client."""
 import asyncio
 import base64
+import ipaddress
 import re
+import socket
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import unquote, urljoin, urlsplit
@@ -34,6 +36,43 @@ class Page:
 
 def _http(url: str) -> bool:
     return urlsplit(url).scheme in ("http", "https")
+
+
+_LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home", ".home.arpa", ".corp", ".intranet")
+
+
+def _ip(host: str):
+    """The address a host string names, including legacy IPv4 forms (127.1, 0x7f000001, 2130706433)."""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    if re.fullmatch(r"[0-9a-fx.]+", host):
+        try:
+            return ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            pass
+    return None
+
+
+def public_host(url: str) -> bool:
+    """False for addresses that point at this machine or a private network.
+    Tor already refuses these (ClientRejectInternalAddresses, exit policies); this is a second,
+    local check so the model or a page can never aim a fetch at loopback/LAN, even via a redirect."""
+    try:
+        host = (urlsplit(url).hostname or "").rstrip(".").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    ip = _ip(host)
+    if ip is not None:
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return ip.is_global and not ip.is_multicast
+    if "." not in host or host == "localhost" or host.endswith(_LOCAL_SUFFIXES):
+        return False
+    return True
 
 
 class _Reader(HTMLParser):
@@ -115,6 +154,8 @@ async def _get(client: httpx.AsyncClient, url: str, limit: int, accept):
         async with asyncio.timeout(DEADLINE):
             # Redirects are followed by hand: httpx would read (and decode) every redirect body unbounded.
             for _ in range(MAX_REDIRECTS + 1):
+                if not public_host(url):
+                    raise WebError("refused: local or private network address")
                 nxt = None
                 async with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as r:
                     loc = r.headers.get("location")
