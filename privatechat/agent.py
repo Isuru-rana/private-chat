@@ -54,9 +54,25 @@ def _tool_content(outcome):
             {"type": "image_url", "image_url": {"url": f"data:{img['mime']};base64,{data}"}}]
 
 
+def _read_note(step: dict) -> str:
+    """Why later requests need approval, in words for the approval card."""
+    if step.get("kind") == "search":
+        return f"it read search results for “{step.get('query', '')}”"
+    if step.get("kind") == "image":
+        return f"it looked at {step.get('url', '')}"
+    return f"it read {step.get('url', '')}"
+
+
 async def run_turn(messages: list[dict], *, llm, session: WebSession | None, mode: str,
                    approve: Callable[[dict], Awaitable[dict]], count: Callable[[str], Awaitable[int]],
-                   budget: int, max_rounds: int = 6, files: FileTools | None = None) -> AsyncIterator[tuple[str, object]]:
+                   budget: int, max_rounds: int = 6, files: FileTools | None = None,
+                   outside: str | None = None) -> AsyncIterator[tuple[str, object]]:
+    """outside: why the chat already holds text from outside (attachments, earlier web results), or None.
+
+    Prompt-injection rule: once text from outside is in front of the model, it may have been told to put
+    chat content into a search query or to encode it in which links it opens. From then on every web
+    request needs the user's OK, also in Auto and Ask-once. Calls chosen before any outside text arrived
+    (the first round of a clean chat) run as the mode says."""
     msgs = list(messages)
     web_on = mode != "off" and session is not None
     answer_ok: bool | None = None  # ask_once verdict for this answer
@@ -68,6 +84,7 @@ async def run_turn(messages: list[dict], *, llm, session: WebSession | None, mod
         if rnd >= max_rounds:
             tools = None
         content, calls = "", []
+        because = outside  # what this round's calls may have been influenced by (set before they ran)
         async for kind, val in llm(msgs, tools=tools):
             if kind == "tool_calls":
                 calls = val
@@ -96,15 +113,18 @@ async def run_turn(messages: list[dict], *, llm, session: WebSession | None, mod
                 text = INVALID
             else:
                 allow = True
-                if mode == "ask_once":
-                    if answer_ok is None:
-                        answer_ok = bool((await approve({"kind": "answer"})).get("allow"))
-                    allow = answer_ok
-                elif mode == "ask_each" and c["name"] in KINDS:
-                    verdict = await approve({"kind": kind, key: args.get(key)})
+                if mode == "ask_each" or because is not None:
+                    req = {"kind": kind, key: args.get(key)}
+                    if mode != "ask_each":
+                        req["because"] = because
+                    verdict = await approve(req)
                     allow = bool(verdict.get("allow"))
                     if allow and kind == "search" and verdict.get("query"):
                         args = {**args, "query": verdict["query"]}
+                elif mode == "ask_once":
+                    if answer_ok is None:
+                        answer_ok = bool((await approve({"kind": "answer"})).get("allow"))
+                    allow = answer_ok
                 if not allow:
                     step = {"kind": kind, key: args.get(key), "status": "denied", "detail": ""}
                     text = DENIED
@@ -112,6 +132,8 @@ async def run_turn(messages: list[dict], *, llm, session: WebSession | None, mod
                     yield "web", {"kind": kind, key: args.get(key), "status": "running"}
                     outcome = await session.run(c["name"], args)
                     step, text = outcome.step, _tool_content(outcome)
+                    if outside is None and step.get("status") == "done":
+                        outside = _read_note(step)  # outside text is now in front of the model
                     src = outcome.source
                     if src and src["url"] not in seen_src:
                         seen_src.add(src["url"])

