@@ -175,6 +175,8 @@ def create_app(
     for name in ("httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.WARNING)
     data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(data_dir, 0o700)  # normal chats are plaintext: keep other local users out
     store = NormalStore(data_dir / "chats.db")
     vault = Vault(data_dir / "vault.bin", kdf=kdf, clock=clock)
     throttle = Throttle(clock=clock)
