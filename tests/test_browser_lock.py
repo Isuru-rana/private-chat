@@ -52,7 +52,7 @@ def server(tmp_path):
 def browser():
     with sync_api.sync_playwright() as p:
         exe = os.environ.get("PC_CHROMIUM")
-        b = p.chromium.launch(**({"executable_path": exe} if exe else {}))
+        b = p.chromium.launch(**({"executable_path": exe} if exe else {"channel": "chromium"}))
         yield b
         b.close()
 
