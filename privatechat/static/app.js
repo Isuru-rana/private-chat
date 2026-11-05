@@ -34,10 +34,29 @@ const MAX_FILE = 5 * 1024 * 1024;
 
 // ---------- API ----------
 
+// Per-launch app token from the address (?k=...), memory only. run.sh opens the page with it;
+// the backend refuses every /api request without it. It stays in the address so a reload works.
+const APP_TOKEN = new URLSearchParams(location.search).get("k") || "";
+
+function noAppToken() {
+  document.body.replaceChildren();
+  const p = document.createElement("p");
+  p.className = "empty";
+  p.textContent = "This address has no valid app key. Start the app with ./run.sh, or open the URL the backend printed.";
+  document.body.append(p);
+}
+
 async function api(path, { method = "GET", body, secret = false } = {}) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", "X-App-Token": APP_TOKEN };
   if (secret) headers["X-Vault-Token"] = state.token || "";
   const resp = await fetch(path, { method, headers, body: body && JSON.stringify(body), cache: "no-store" });
+  if (resp.status === 401 && resp.headers.get("content-type")?.startsWith("application/json")) {
+    const err = await resp.clone().json().catch(() => ({}));
+    if (err.error === "app_token") {
+      noAppToken();
+      throw new Error("app_token");
+    }
+  }
   if (secret && resp.status === 401) {
     lockUI();
     throw new Error("locked");
@@ -891,7 +910,7 @@ function lockUI() {
 
 async function lockVault() {
   await denyPendingApprovals();
-  await fetch("/api/vault/lock", { method: "POST", cache: "no-store" });
+  await api("/api/vault/lock", { method: "POST" });
   lockUI();
 }
 
@@ -1120,7 +1139,10 @@ $("wipe-dialog").addEventListener("close", () => {
   $("wipe-confirm").value = "";
 });
 window.addEventListener("pagehide", () => {
-  if (state.token) navigator.sendBeacon("/api/vault/lock");
+  // sendBeacon can't send headers, so it would be refused for lacking the app token: use a keepalive fetch.
+  if (state.token) {
+    fetch("/api/vault/lock", { method: "POST", keepalive: true, cache: "no-store", headers: { "X-App-Token": APP_TOKEN } });
+  }
 });
 
 // The backend auto-locks after idle time; mirror that so secret text doesn't stay on screen.
