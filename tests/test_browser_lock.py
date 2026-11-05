@@ -16,6 +16,13 @@ from test_api import APP_TOKEN, PW, Clock, fake_llm, slots_ok
 
 sync_api = pytest.importorskip("playwright.sync_api")
 
+BRAVE_DROPS_UNLOAD = ("Brave drops requests sent while a page unloads (keepalive fetch and sendBeacon alike), "
+                      "so tab-close locking can't be tested there; see SECURITY_REVIEW.md I8")
+
+
+def _is_brave(exe: str | None) -> bool:
+    return bool(exe) and any("brave" in p.lower() for p in (exe, os.path.realpath(exe)))
+
 
 @pytest.fixture
 def server(tmp_path):
@@ -59,6 +66,7 @@ def _wait(cond, timeout=5.0):
     return cond()
 
 
+@pytest.mark.skipif(_is_brave(os.environ.get("PC_CHROMIUM")), reason=BRAVE_DROPS_UNLOAD)
 def test_closing_the_tab_locks_the_vault(server, browser):
     app, url = server
     page = browser.new_page()

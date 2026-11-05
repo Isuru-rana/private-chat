@@ -204,6 +204,17 @@ defences and output escaping are sound (details under "Checked and found sound")
 - **I7. Old vault copies on disk** survive in freed blocks and backups under the password current
   at the time (README "Change password and wipe"). Already documented; full-disk encryption is the
   real fix.
+- **I8. Brave drops lock-on-tab-close requests.** When a page unloads, Brave does not deliver the
+  lock request, whether it is sent as a `keepalive` fetch (current code, `privatechat/static/app.js`
+  `pagehide` handler) or with `navigator.sendBeacon` (the old code). Seen in headless and headful
+  Brave; Playwright's Chromium delivers it. Not a regression from the app-key change. In practice:
+  - **Closing the app window still locks:** `run.sh` stops the backend when Brave exits, and the
+    key lives only in backend memory.
+  - **A reload or a navigation inside the window** may leave the vault unlocked on the backend until
+    the **10-minute idle auto-lock** (suspend time counts). The reloaded page itself starts locked and
+    holds no vault token, so nothing secret is shown; it locks the backend on start-up too.
+  - `tests/test_browser_lock.py::test_closing_the_tab_locks_the_vault` skips when `PC_CHROMIUM`
+    points at Brave, with this reason.
 
 ---
 
