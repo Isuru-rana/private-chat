@@ -38,3 +38,10 @@ def test_chunked_body_refused(tmp_path, clock):
 def test_normal_sized_requests_still_work(tmp_path, clock):
     with make_client(tmp_path, clock) as c:
         assert unlocked(c)
+
+
+def test_data_dir_private(tmp_path, clock):
+    data = tmp_path / "data"
+    with make_client(data, clock):
+        pass
+    assert stat.S_IMODE(os.stat(data).st_mode) == 0o700
