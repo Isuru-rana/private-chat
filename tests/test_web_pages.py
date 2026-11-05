@@ -316,3 +316,46 @@ def test_form_wrapped_page_keeps_its_text():
     body = b"<html><body><form runat='server'><h1>Ministry</h1><p>Opening hours are 9-5.</p><script>evil()</script></form></body></html>"
     p = run(_read(body))
     assert "Ministry" in p.text and "Opening hours are 9-5." in p.text and "evil" not in p.text
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:3050/api/chats", "http://localhost:8088/slots", "http://LOCALHOST./",
+    "http://127.1/", "http://2130706433/", "http://0x7f000001/", "http://0.0.0.0/",
+    "http://[::1]:3050/", "http://[::ffff:127.0.0.1]/", "http://192.168.1.1/", "http://10.0.0.1/",
+    "http://172.17.0.1:9051/", "http://169.254.169.254/latest/meta-data/", "http://100.64.0.1/",
+    "http://nas/", "http://printer.local/", "http://app.localhost/", "http://router.home.arpa/",
+    "http://private-web-tor:9050/", "http://[fe80::1]/",
+])
+def test_local_and_private_addresses_refused(url):
+    hits = []
+
+    async def go():
+        async with client(lambda req: hits.append(req) or httpx.Response(200, content=b"x")) as c:
+            await read_page(c, url)
+
+    with pytest.raises(WebError, match="local or private"):
+        run(go())
+    assert hits == []
+
+
+def test_redirect_to_local_address_refused():
+    hits = []
+
+    def handler(req):
+        hits.append(str(req.url))
+        return httpx.Response(302, headers={"location": "http://127.0.0.1:3050/api/chats"})
+
+    async def go():
+        async with client(handler) as c:
+            await read_page(c, "https://ex.test/")
+
+    with pytest.raises(WebError, match="local or private"):
+        run(go())
+    assert hits == ["https://ex.test/"]
+
+
+@pytest.mark.parametrize("url", ["https://example.com/", "http://93.184.215.14/", "https://x.onion/",
+                                 "https://[2606:4700::1111]/"])
+def test_public_addresses_allowed(url):
+    from privatechat.web.pages import public_host
+    assert public_host(url)
